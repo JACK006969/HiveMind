@@ -1,17 +1,19 @@
 services:
+  # Backend API
   - type: web
     name: hivemind-api
     env: python
-    buildCommand: "cd apps/api && pip install -r requirements.txt"
-    startCommand: "cd apps/api && gunicorn main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT"
+    region: oregon
+    plan: standard
+    dockerfilePath: ./apps/api/Dockerfile
     envVars:
       - key: GROQ_API_KEY
         sync: false
       - key: BYBIT_API_KEY
         sync: false
-      - key: GOOGLE_CLIENT_ID
+      - key: GITHUB_CLIENT_ID
         sync: false
-      - key: GOOGLE_CLIENT_SECRET
+      - key: GITHUB_CLIENT_SECRET
         sync: false
       - key: JWT_SECRET
         sync: false
@@ -27,19 +29,27 @@ services:
           name: hivemind-redis
           property: connectionString
 
+  # Frontend Web
   - type: web
     name: hivemind-web
     env: node
-    buildCommand: "cd apps/web && npm install && npm run build"
-    startCommand: "cd apps/web && npm start"
+    region: oregon
+    plan: standard
+    dockerfilePath: ./apps/web/Dockerfile
     envVars:
       - key: NEXT_PUBLIC_API_URL
         sync: false
       - key: NEXT_PUBLIC_WS_URL
         sync: false
 
+  # Redis
   - type: redis
     name: hivemind-redis
+    plan: standard
+    maxmemoryPolicy: allkeys-lru
 
 databases:
   - name: hivemind-db
+    plan: standard
+    databaseName: hivemind_db
+    user: hivemind_user
