@@ -18,8 +18,8 @@ class Settings(BaseSettings):
     BYBIT_API_KEY: str
     
     # Auth & Security
-    GOOGLE_CLIENT_ID: str
-    GOOGLE_CLIENT_SECRET: str
+  GITHUB_CLIENT_ID: str
+GITHUB_CLIENT_SECRET: str
     JWT_SECRET: str
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440  # 24 hours
