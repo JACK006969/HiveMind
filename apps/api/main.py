@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 import redis.asyncio as redis
 
 from app.core.config import settings
-from app.api.routes import router
+from app.api.routes import router, auth_router  # ✅ Import both routers
 from app.models.database import engine, Base
 
 # Create tables on startup
@@ -38,6 +38,7 @@ app.add_middleware(
 
 # Include routes
 app.include_router(router, prefix="/api/v1")
+app.include_router(auth_router, prefix="/api/v1")  # ✅ ADD THIS LINE
 
 @app.get("/")
 async def root():
