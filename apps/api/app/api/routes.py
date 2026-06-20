@@ -1,23 +1,109 @@
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Request
 from sqlalchemy.orm import Session
+from pydantic import BaseModel
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
+import jwt
+import httpx
 import redis.asyncio as redis
+import uuid
 
-from app.models.database import get_db, User, AISignal, PaperTrade, AuditLog
+from app.models.database import get_db, SessionLocal, User, AISignal, PaperTrade, AuditLog
 from app.services.market_data_service import MarketDataService
 from app.services.research_engine import ResearchEngine
 from app.services.risk_engine import RiskEngine
 from app.core.config import settings
 
+# Initialize Routers
 router = APIRouter()
+auth_router = APIRouter(prefix="/auth", tags=["Authentication"])
+
+# Initialize Services
 market_service = MarketDataService()
 research_engine = ResearchEngine()
 risk_engine = RiskEngine()
 
 # Redis for WebSocket pub/sub
 redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+
+# ==========================================
+# 1. AUTHENTICATION ROUTES (GitHub OAuth)
+# ==========================================
+
+class GitHubLoginRequest(BaseModel):
+    code: str
+
+@auth_router.post("/github")
+async def github_login(payload: GitHubLoginRequest):
+    """Exchanges GitHub OAuth code for user data and creates a JWT"""
+    
+    # 1. Exchange the code for an Access Token
+    async with httpx.AsyncClient() as client:
+        token_res = await client.post(
+            "https://github.com/login/oauth/access_token",
+            json={
+                "client_id": settings.GITHUB_CLIENT_ID,
+                "client_secret": settings.GITHUB_CLIENT_SECRET,
+                "code": payload.code
+            },
+            headers={"Accept": "application/json"}
+        )
+        token_data = token_res.json()
+        access_token = token_data.get("access_token")
+        
+        if not access_token:
+            raise HTTPException(status_code=400, detail="Failed to get GitHub access token")
+
+        # 2. Fetch User Profile from GitHub
+        user_res = await client.get(
+            "https://api.github.com/user",
+            headers={"Authorization": f"Bearer {access_token}"}
+        )
+        github_user = user_res.json()
+
+    # 3. Create or update user in our database
+    db = SessionLocal()
+    email = github_user.get("email") or f"{github_user['id']}@github.placeholder"
+    
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        user = User(
+            id=str(uuid.uuid4()),
+            email=email,
+            name=github_user.get("name") or github_user.get("login"),
+            avatar_url=github_user.get("avatar_url"),
+            google_id=str(github_user["id"]) # Reusing field for GitHub ID
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+    # 4. Generate JWT Token
+    expire = datetime.utcnow() + timedelta(days=7)
+    jwt_payload = {"user_id": user.id, "email": user.email, "exp": expire}
+    
+    token = jwt.encode(
+        jwt_payload, 
+        settings.JWT_SECRET, 
+        algorithm=settings.JWT_ALGORITHM
+    )
+    
+    db.close()
+    
+    return {
+        "token": token,
+        "user": {
+            "id": user.id,
+            "name": user.name,
+            "email": user.email,
+            "avatar_url": user.avatar_url
+        }
+    }
+
+# ==========================================
+# 2. MARKET DATA ROUTES
+# ==========================================
 
 @router.get("/health")
 async def health_check():
@@ -38,6 +124,10 @@ async def get_market_indicators(symbol: str, interval: str = "60", limit: int = 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# ==========================================
+# 3. AI ANALYSIS ROUTES
+# ==========================================
+
 @router.post("/ai/analyze/{symbol}")
 async def analyze_symbol(symbol: str, db: Session = Depends(get_db)):
     """Generate AI trading signal for a symbol"""
@@ -54,6 +144,7 @@ async def analyze_symbol(symbol: str, db: Session = Depends(get_db)):
         
         # 4. Save to database
         db_signal = AISignal(
+            id=str(uuid.uuid4()),
             symbol=symbol.upper(),
             direction=signal_data["direction"],
             confidence_score=signal_data["confidence_score"],
@@ -83,6 +174,16 @@ async def analyze_symbol(symbol: str, db: Session = Depends(get_db)):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+
+@router.get("/ai-signals/recent")
+async def get_recent_signals(limit: int = 20, db: Session = Depends(get_db)):
+    """Get recent AI signals"""
+    signals = db.query(AISignal).order_by(AISignal.created_at.desc()).limit(limit).all()
+    return {"signals": signals, "count": len(signals)}
+
+# ==========================================
+# 4. PAPER TRADING ROUTES
+# ==========================================
 
 @router.post("/paper-trades")
 async def create_paper_trade(
@@ -115,6 +216,7 @@ async def create_paper_trade(
         
         # Create paper trade
         paper_trade = PaperTrade(
+            id=str(uuid.uuid4()),
             user_id=user_id,
             signal_id=signal_id,
             symbol=symbol.upper(),
@@ -130,6 +232,7 @@ async def create_paper_trade(
         
         # Log audit
         audit = AuditLog(
+            id=str(uuid.uuid4()),
             user_id=user_id,
             action="PAPER_TRADE_CREATED",
             metadata={"trade_id": paper_trade.id, "symbol": symbol}
@@ -154,11 +257,9 @@ async def get_user_paper_trades(user_id: str, db: Session = Depends(get_db)):
     trades = db.query(PaperTrade).filter(PaperTrade.user_id == user_id).order_by(PaperTrade.opened_at.desc()).all()
     return {"trades": trades, "count": len(trades)}
 
-@router.get("/ai-signals/recent")
-async def get_recent_signals(limit: int = 20, db: Session = Depends(get_db)):
-    """Get recent AI signals"""
-    signals = db.query(AISignal).order_by(AISignal.created_at.desc()).limit(limit).all()
-    return {"signals": signals, "count": len(signals)}
+# ==========================================
+# 5. WEBSOCKET ROUTES
+# ==========================================
 
 @router.websocket("/ws/signals")
 async def websocket_signals(websocket: WebSocket):
